@@ -1,0 +1,34 @@
+name: Daily Gov Deal Fetch
+
+on:
+  schedule:
+    - cron: '0 7 * * *'   # Every day at 7:00 AM UTC
+  workflow_dispatch:        # Also allows manual trigger from GitHub UI
+
+jobs:
+  fetch-and-email:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+        working-directory: scripts
+
+      - name: Run fetch and send email
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          EXTRA_KEYWORDS: ${{ secrets.EXTRA_KEYWORDS }}
+        run: node fetch.js
+        working-directory: scripts
