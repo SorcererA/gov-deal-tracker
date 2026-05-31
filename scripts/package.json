@@ -1,0 +1,11 @@
+{
+  "name": "gov-tracker-scripts",
+  "version": "1.0.0",
+  "description": "Daily US government deal intelligence fetcher",
+  "main": "fetch.js",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.24.0",
+    "@sendgrid/mail": "^8.1.0"
+  }
+}
