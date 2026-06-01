@@ -39,7 +39,6 @@ function sanitizeJson(raw) {
   const ei = raw.lastIndexOf(']');
   if (si < 0 || ei < 0) return null;
   let s = raw.substring(si, ei + 1);
-  // Neutralise control characters inside strings
   s = s.replace(/[\u0000-\u001F\u007F]/g, c => {
     if (c === '\n') return '\\n';
     if (c === '\r') return '\\r';
@@ -51,7 +50,6 @@ function sanitizeJson(raw) {
 
 function extractObjectsFallback(raw) {
   const results = [];
-  // Match top-level JSON objects (non-nested brace pairs)
   const re = /\{(?:[^{}]|\{[^{}]*\})*\}/g;
   for (const m of raw.match(re) || []) {
     try {
@@ -86,15 +84,20 @@ function dealStr(s) {
 }
 
 // ── Fetch stories ─────────────────────────────────────────────────────────────
-async function fetchStories() {
+async function fetchStories(existingTitles = []) {
   const client  = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
   const today   = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   const sectors = ['Defense','Technology','Energy','Healthcare','Infrastructure','Finance','Space','Manufacturing','Other'];
 
+  // Pass up to 50 recent titles so Claude actively avoids them
+  const seenBlock = existingTitles.length > 0
+    ? `\nSTORIES ALREADY IN ARCHIVE — do NOT return these or any story covering the same event or deal:\n${existingTitles.slice(0, 50).map((t, i) => `${i+1}. ${t}`).join('\n')}\n`
+    : '';
+
   const systemPrompt = `You are a financial intelligence analyst specializing in US government contracts, partnerships, and investment commitments that affect publicly traded companies.
 
 CRITICAL: Your entire response must be a single valid JSON array. No markdown, no explanation, no text outside the array. All string values must use only plain ASCII — no curly quotes, no em-dashes, no special characters. Keep all string values concise (under 200 characters) to avoid JSON parsing issues.
-
+${seenBlock}
 Each object must have EXACTLY these fields:
 - title: string, plain ASCII headline
 - summary: string, 2 sentences max, plain ASCII
@@ -113,11 +116,14 @@ Each object must have EXACTLY these fields:
 - catalysts: array of 2-3 short strings
 - timeHorizon: one of: short, medium, long
 
-Find 8-10 significant recent stories. Focus on: executive orders with named commercial beneficiaries, DOD/DOE/NASA/HHS/DOT contracts, AI and semiconductor partnerships, reshoring incentives, energy policy deals, pharma commitments, infrastructure spending.${EXTRA_KEYWORDS ? ` Also cover: ${EXTRA_KEYWORDS}.` : ''}
+Find 8-10 significant recent stories NOT already in the archive above. Focus on: executive orders with named commercial beneficiaries, DOD/DOE/NASA/HHS/DOT contracts, AI and semiconductor partnerships, reshoring incentives, energy policy deals, pharma commitments, infrastructure spending.${EXTRA_KEYWORDS ? ` Also cover: ${EXTRA_KEYWORDS}.` : ''}
+
+If there are genuinely no new stories not already covered, return an empty array: []
 
 Return ONLY the JSON array, nothing else.`;
 
   console.log('Calling Anthropic API with web search...');
+  console.log(`Sending ${existingTitles.length} existing titles to Claude to avoid duplicates`);
 
   const response = await client.messages.create({
     model: 'claude-sonnet-4-5',
@@ -126,7 +132,7 @@ Return ONLY the JSON array, nothing else.`;
     system: systemPrompt,
     messages: [{
       role: 'user',
-      content: `Today is ${today}. Search the web for the latest (past 7 days) US government partnership, contract, investment, and executive order news affecting publicly traded US companies. Include Trump administration actions, agency contracts, public-private AI/tech/defense/energy initiatives. Respond with ONLY a JSON array — no explanation, no markdown, just the raw JSON array starting with [ and ending with ].`
+      content: `Today is ${today}. Search the web for the latest (past 24 hours) US government partnership, contract, investment, and executive order news affecting publicly traded US companies. Include Trump administration actions, agency contracts, public-private AI/tech/defense/energy initiatives. Only return stories NOT already in the archive list above. Respond with ONLY a JSON array — no explanation, no markdown, just the raw JSON array starting with [ and ending with ].`
     }]
   });
 
@@ -137,8 +143,15 @@ Return ONLY the JSON array, nothing else.`;
 
   console.log(`Raw response length: ${raw.length} chars`);
 
+  // Handle explicit empty array
+  const trimmed = raw.replace(/```json/gi,'').replace(/```/g,'').trim();
+  if (trimmed === '[]') {
+    console.log('Claude confirmed: no new stories today');
+    return [];
+  }
+
   const parsed = robustParse(raw);
-  if (!parsed || !parsed.length) {
+  if (!parsed) {
     console.error('Raw response snippet:', raw.substring(0, 500));
     throw new Error('Failed to parse stories from API response');
   }
@@ -155,9 +168,8 @@ function buildEmailHtml(newStories, allStories) {
   const total = newStories.reduce((a, s) => a + (s.dealSizeNum || 0), 0);
   const totalStr = total > 0 ? `$${total >= 1000 ? (total/1000).toFixed(1) + 'B' : total + 'M'}` : 'N/A';
 
-  const sentColor = { bullish: '#1D9E75', bearish: '#E24B4A', neutral: '#888780' };
-  const sentBg    = { bullish: '#EAF3DE', bearish: '#FCEBEB', neutral: '#f5f5f3' };
-  const sentText  = { bullish: '#3B6D11', bearish: '#A32D2D', neutral: '#6b6b66' };
+  const sentBg   = { bullish: '#EAF3DE', bearish: '#FCEBEB', neutral: '#f5f5f3' };
+  const sentText = { bullish: '#3B6D11', bearish: '#A32D2D', neutral: '#6b6b66' };
 
   const storyCards = newStories.map(s => `
     <div style="background:#ffffff;border:1px solid #e5e5e0;border-radius:10px;padding:18px 20px;margin-bottom:12px">
@@ -184,7 +196,7 @@ function buildEmailHtml(newStories, allStories) {
         </tr>
       </table>
       ${(s.catalysts||[]).length ? `<div style="font-size:11px;color:#6b6b66">${(s.catalysts||[]).map(c=>`<span style="display:inline-block;background:#EEEDFE;color:#3C3489;padding:2px 8px;border-radius:20px;margin:2px 4px 2px 0">${c}</span>`).join('')}</div>` : ''}
-      ${s.sourceUrl ? `<div style="margin-top:8px"><a href="${s.sourceUrl}" style="font-size:11px;color:#185FA5;text-decoration:none">View source →</a></div>` : ''}
+      ${s.sourceUrl ? `<div style="margin-top:8px"><a href="${s.sourceUrl}" style="font-size:11px;color:#185FA5;text-decoration:none">View source</a></div>` : ''}
     </div>
   `).join('');
 
@@ -193,14 +205,10 @@ function buildEmailHtml(newStories, allStories) {
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="margin:0;padding:0;background:#eeede8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif">
   <div style="max-width:640px;margin:0 auto;padding:24px 16px 40px">
-
-    <!-- Header -->
     <div style="text-align:center;padding:28px 0 20px">
       <div style="font-size:22px;font-weight:700;color:#1a1a18;letter-spacing:-.5px">US Gov Deal Intelligence</div>
       <div style="font-size:13px;color:#6b6b66;margin-top:4px">${date}</div>
     </div>
-
-    <!-- Stats row -->
     <div style="display:flex;gap:8px;margin-bottom:20px">
       <div style="flex:1;background:#ffffff;border-radius:8px;padding:12px;text-align:center;border:1px solid #e5e5e0">
         <div style="font-size:10px;color:#9b9b96;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px">New stories</div>
@@ -219,37 +227,24 @@ function buildEmailHtml(newStories, allStories) {
         <div style="font-size:24px;font-weight:700;color:#185FA5">${totalStr}</div>
       </div>
     </div>
-
-    <!-- Stories -->
-    <div style="font-size:13px;font-weight:600;color:#6b6b66;margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px">Today's intelligence (${newStories.length} stories)</div>
+    <div style="font-size:13px;font-weight:600;color:#6b6b66;margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px">Today's intelligence (${newStories.length} new stories)</div>
     ${storyCards}
-
-    <!-- Footer -->
     <div style="text-align:center;padding:20px 0 0;border-top:1px solid #e5e5e0;margin-top:8px">
       <div style="font-size:11px;color:#9b9b96;line-height:1.6">
         Archive total: ${allStories.length} stories collected<br>
         This digest is generated automatically every day at 7:00 AM UTC<br><br>
-        <strong style="color:#A32D2D">⚠ For research purposes only. Not financial advice.</strong><br>
-        Always conduct your own due diligence before making investment decisions.
+        <strong style="color:#A32D2D">For research purposes only. Not financial advice.</strong>
       </div>
     </div>
-
   </div>
 </body>
 </html>`;
 }
 
-// ── Build plain-text email fallback ──────────────────────────────────────────
+// ── Build plain-text email ────────────────────────────────────────────────────
 function buildEmailText(newStories) {
   const date = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-  const lines = [
-    'US GOV DEAL INTELLIGENCE',
-    date,
-    '='.repeat(50),
-    '',
-    `${newStories.length} new stories today`,
-    '',
-  ];
+  const lines = ['US GOV DEAL INTELLIGENCE', date, '='.repeat(50), '', `${newStories.length} new stories today`, ''];
   newStories.forEach((s, i) => {
     lines.push(`${i+1}. ${s.title}`);
     lines.push(`   ${s.sentiment.toUpperCase()} | ${s.sector} | ${dealStr(s)} | ${s.timeHorizon} horizon`);
@@ -268,9 +263,8 @@ function buildEmailText(newStories) {
 // ── Send email ────────────────────────────────────────────────────────────────
 async function sendEmail(newStories, allStories) {
   const resend = new Resend(RESEND_API_KEY);
-
-  const date    = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  const bull    = newStories.filter(s => s.sentiment === 'bullish').length;
+  const date   = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const bull   = newStories.filter(s => s.sentiment === 'bullish').length;
   const subject = `US Gov Deal Intel — ${date} — ${newStories.length} stories, ${bull} bullish`;
 
   const { data, error } = await resend.emails.send({
@@ -292,37 +286,37 @@ async function main() {
 
   // Load existing archive
   const archive = loadArchive();
-  const existingTitles = new Set(archive.map(s => (s.title || '').toLowerCase()));
+  const existingTitles = archive.map(s => (s.title || '').toLowerCase());
   console.log(`Archive has ${archive.length} existing stories`);
 
-  // Fetch new stories
-  const fetched = await fetchStories();
+  // Fetch only NEW stories — pass existing titles so Claude skips them
+  const fetched = await fetchStories(existingTitles);
 
-  // Deduplicate
+  // Secondary dedup safety net (exact title match)
+  const existingSet = new Set(existingTitles);
   const newStories = fetched
-    .filter(s => !existingTitles.has((s.title || '').toLowerCase()))
+    .filter(s => !existingSet.has((s.title || '').toLowerCase()))
     .map((s, i) => ({ ...s, id: `s_${Date.now()}_${i}`, fetchedAt: new Date().toISOString() }));
 
   console.log(`New stories after dedup: ${newStories.length}`);
+
+  if (newStories.length === 0) {
+    console.log('No new stories found — skipping email and archive update');
+    return;
+  }
 
   // Merge and save archive (keep latest 500)
   const merged = [...newStories, ...archive].slice(0, 500);
   saveArchive(merged);
   console.log(`Archive saved: ${merged.length} total stories`);
 
-  // Save latest HTML report (viewable as a static page)
-  const reportHtml = buildEmailHtml(newStories.length ? newStories : fetched.slice(0, 8), merged);
+  // Save latest HTML report
   fs.mkdirSync(path.dirname(REPORT_PATH), { recursive: true });
-  fs.writeFileSync(REPORT_PATH, reportHtml);
+  fs.writeFileSync(REPORT_PATH, buildEmailHtml(newStories, merged));
   console.log('HTML report saved to data/latest-report.html');
 
-  // Send email if there are new stories (or always send if archive was empty)
-  const toEmail = newStories.length > 0 ? newStories : fetched.slice(0, 8);
-  if (toEmail.length > 0) {
-    await sendEmail(toEmail, merged);
-  } else {
-    console.log('No new stories found, skipping email');
-  }
+  // Send email
+  await sendEmail(newStories, merged);
 
   console.log('=== Done ===');
 }
