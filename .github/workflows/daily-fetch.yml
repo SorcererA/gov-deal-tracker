@@ -1,8 +1,8 @@
 name: Daily Gov Deal Fetch
 
 on:
-  schedule:
-    - cron: '0 12 * * *'   # Every day at 7:00 AM UTC
+  repository_dispatch:
+    types: [daily-fetch]   # Triggered by cron-job.org via GitHub API
   workflow_dispatch:        # Also allows manual trigger from GitHub UI
 
 jobs:
