@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import sgMail from '@sendgrid/mail';
+import { Resend } from 'resend';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -10,13 +10,13 @@ const REPORT_PATH  = path.join(__dirname, '..', 'data', 'latest-report.html');
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const SENDGRID_API_KEY  = process.env.SENDGRID_API_KEY;
+const RESEND_API_KEY    = process.env.RESEND_API_KEY;
 const EMAIL_FROM        = process.env.EMAIL_FROM;
 const EMAIL_TO          = process.env.EMAIL_TO;
 const EXTRA_KEYWORDS    = process.env.EXTRA_KEYWORDS || '';
 
 if (!ANTHROPIC_API_KEY) { console.error('Missing ANTHROPIC_API_KEY'); process.exit(1); }
-if (!SENDGRID_API_KEY)  { console.error('Missing SENDGRID_API_KEY');  process.exit(1); }
+if (!RESEND_API_KEY)    { console.error('Missing RESEND_API_KEY');    process.exit(1); }
 if (!EMAIL_FROM)        { console.error('Missing EMAIL_FROM');         process.exit(1); }
 if (!EMAIL_TO)          { console.error('Missing EMAIL_TO');           process.exit(1); }
 
@@ -267,22 +267,22 @@ function buildEmailText(newStories) {
 
 // ── Send email ────────────────────────────────────────────────────────────────
 async function sendEmail(newStories, allStories) {
-  sgMail.setApiKey(SENDGRID_API_KEY);
+  const resend = new Resend(RESEND_API_KEY);
 
   const date    = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   const bull    = newStories.filter(s => s.sentiment === 'bullish').length;
   const subject = `US Gov Deal Intel — ${date} — ${newStories.length} stories, ${bull} bullish`;
 
-  const msg = {
-    to:      EMAIL_TO,
+  const { data, error } = await resend.emails.send({
     from:    EMAIL_FROM,
+    to:      EMAIL_TO,
     subject,
     text:    buildEmailText(newStories),
     html:    buildEmailHtml(newStories, allStories),
-  };
+  });
 
-  await sgMail.send(msg);
-  console.log(`Email sent to ${EMAIL_TO}`);
+  if (error) throw new Error(`Resend error: ${JSON.stringify(error)}`);
+  console.log(`Email sent to ${EMAIL_TO} — id: ${data.id}`);
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
