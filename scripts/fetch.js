@@ -120,7 +120,7 @@ Return ONLY the JSON array, nothing else.`;
   console.log('Calling Anthropic API with web search...');
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-5',
     max_tokens: 6000,
     tools: [{ type: 'web_search_20250305', name: 'web_search' }],
     system: systemPrompt,
