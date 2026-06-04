@@ -125,35 +125,54 @@ Return ONLY the JSON array, nothing else.`;
   console.log('Calling Anthropic API with web search...');
   console.log(`Sending ${existingTitles.length} existing titles to Claude to avoid duplicates`);
 
-  const response = await client.messages.create({
-    model: 'claude-sonnet-4-5',
-    max_tokens: 6000,
-    tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-    system: systemPrompt,
-    messages: [{
-      role: 'user',
-      content: `Today is ${today}. Search the web for the latest (past 24 hours) US government partnership, contract, investment, and executive order news affecting publicly traded US companies. Include Trump administration actions, agency contracts, public-private AI/tech/defense/energy initiatives. Only return stories NOT already in the archive list above. Respond with ONLY a JSON array — no explanation, no markdown, just the raw JSON array starting with [ and ending with ].`
-    }]
-  });
+  const makeRequest = async (windowLabel) => {
+    const userMsg = windowLabel === '24h'
+      ? `Today is ${today}. Search the web for the latest (past 24 hours) US government partnership, contract, investment, and executive order news affecting publicly traded US companies. Include Trump administration actions, agency contracts, public-private AI/tech/defense/energy initiatives. Only return stories NOT already in the archive list above. Respond with ONLY a JSON array — no explanation, no markdown, just the raw JSON array starting with [ and ending with ].`
+      : `Today is ${today}. Search the web for the latest (past 7 days) US government partnership, contract, investment, and executive order news affecting publicly traded US companies. Include Trump administration actions, agency contracts, public-private AI/tech/defense/energy initiatives. Only return stories NOT already in the archive list above. Respond with ONLY a JSON array — no explanation, no markdown, just the raw JSON array starting with [ and ending with ].`;
 
-  let raw = '';
-  for (const block of response.content) {
-    if (block.type === 'text') raw += block.text;
-  }
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 6000,
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userMsg }]
+    });
 
+    let raw = '';
+    for (const block of response.content) {
+      if (block.type === 'text') raw += block.text;
+    }
+    return raw;
+  };
+
+  // First attempt: past 24 hours
+  console.log('Attempt 1: searching past 24 hours...');
+  let raw = await makeRequest('24h');
   console.log(`Raw response length: ${raw.length} chars`);
+  console.log(`Raw response preview: ${raw.substring(0, 300)}`);
+
+  // If response is too short or has no JSON array, it returned text instead of JSON
+  // Fall back to 7-day window
+  const has7Array = raw.includes('[') && raw.includes(']');
+  const tooShort = raw.length < 200;
+  if (tooShort || !has7Array) {
+    console.log(`24h search returned no usable JSON (length: ${raw.length}, hasArray: ${has7Array}) — retrying with 7-day window...`);
+    raw = await makeRequest('7d');
+    console.log(`Fallback raw response length: ${raw.length} chars`);
+    console.log(`Fallback raw response preview: ${raw.substring(0, 300)}`);
+  }
 
   // Handle explicit empty array
   const trimmed = raw.replace(/```json/gi,'').replace(/```/g,'').trim();
   if (trimmed === '[]') {
-    console.log('Claude confirmed: no new stories today');
+    console.log('Claude confirmed: no new stories in either window');
     return [];
   }
 
   const parsed = robustParse(raw);
-  if (!parsed) {
-    console.error('Raw response snippet:', raw.substring(0, 500));
-    throw new Error('Failed to parse stories from API response');
+  if (!parsed || parsed.length === 0) {
+    console.error('Full raw response:', raw);
+    throw new Error(`Failed to parse stories. Response was ${raw.length} chars but contained no valid story objects.`);
   }
 
   console.log(`Parsed ${parsed.length} stories`);
@@ -289,8 +308,14 @@ async function main() {
   const existingTitles = archive.map(s => (s.title || '').toLowerCase());
   console.log(`Archive has ${archive.length} existing stories`);
 
-  // Fetch only NEW stories — pass existing titles so Claude skips them
+  // Fetch stories — Claude already received the archive titles to avoid duplicates
   const fetched = await fetchStories(existingTitles);
+  console.log(`Claude returned ${fetched.length} stories`);
+
+  if (fetched.length === 0) {
+    console.log('No stories returned by Claude — skipping email and archive update');
+    return;
+  }
 
   // Secondary dedup safety net (exact title match)
   const existingSet = new Set(existingTitles);
@@ -298,25 +323,30 @@ async function main() {
     .filter(s => !existingSet.has((s.title || '').toLowerCase()))
     .map((s, i) => ({ ...s, id: `s_${Date.now()}_${i}`, fetchedAt: new Date().toISOString() }));
 
-  console.log(`New stories after dedup: ${newStories.length}`);
+  console.log(`New stories after secondary dedup: ${newStories.length}`);
+  console.log(`Duplicate stories filtered out: ${fetched.length - newStories.length}`);
+
+  // Use newStories if any, otherwise use all fetched (means archive was stale/empty)
+  const storiesToSend = newStories.length > 0 ? newStories : fetched.map((s, i) => ({
+    ...s, id: `s_${Date.now()}_${i}`, fetchedAt: new Date().toISOString()
+  }));
 
   if (newStories.length === 0) {
-    console.log('No new stories found — skipping email and archive update');
-    return;
+    console.log('All fetched stories matched archive — sending anyway as daily digest');
   }
 
   // Merge and save archive (keep latest 500)
-  const merged = [...newStories, ...archive].slice(0, 500);
+  const merged = [...storiesToSend, ...archive].slice(0, 500);
   saveArchive(merged);
   console.log(`Archive saved: ${merged.length} total stories`);
 
   // Save latest HTML report
   fs.mkdirSync(path.dirname(REPORT_PATH), { recursive: true });
-  fs.writeFileSync(REPORT_PATH, buildEmailHtml(newStories, merged));
+  fs.writeFileSync(REPORT_PATH, buildEmailHtml(storiesToSend, merged));
   console.log('HTML report saved to data/latest-report.html');
 
   // Send email
-  await sendEmail(newStories, merged);
+  await sendEmail(storiesToSend, merged);
 
   console.log('=== Done ===');
 }
